@@ -1,0 +1,164 @@
+use axum::{
+    extract::{Extension, Path, Query, State},
+    Json,
+};
+use std::collections::HashMap;
+use uuid::Uuid;
+
+use crate::{
+    config::Claims,
+    error::AppError,
+    models::contact::{Contact, CreateContactRequest, UpdateContactRequest},
+    state::AppState, features,
+};
+
+pub async fn list_contacts(
+    Extension(claims): Extension<Claims>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Contact>>, AppError> {
+    let items = sqlx::query_as::<_, Contact>(
+        "SELECT * FROM contacts WHERE tenant_id = $1 ORDER BY name ASC",
+    )
+    .bind(claims.tenant_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(items))
+}
+
+pub async fn create_contact(
+    Extension(claims): Extension<Claims>,
+    State(state): State<AppState>,
+    Json(req): Json<CreateContactRequest>,
+) -> Result<Json<Contact>, AppError> {
+    features::enforce_feature_limit(&state.pool, claims.tenant_id, "max_contacts", "Contacts").await?;
+    let id = Uuid::new_v4();
+    let now = chrono::Utc::now().naive_utc();
+
+    sqlx::query(
+        "INSERT INTO contacts (id, name, phone, email, company, notes, tags, tenant_id, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(id)
+    .bind(&req.name)
+    .bind(&req.phone)
+    .bind(&req.email)
+    .bind(&req.company)
+    .bind(&req.notes)
+    .bind(&req.tags)
+    .bind(claims.tenant_id)
+    .bind(now)
+    .bind(now)
+    .execute(&state.pool)
+    .await?;
+
+    let item = sqlx::query_as::<_, Contact>("SELECT * FROM contacts WHERE id = $1")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+    Ok(Json(item))
+}
+
+pub async fn get_contact(
+    Extension(claims): Extension<Claims>,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Contact>, AppError> {
+    let item = sqlx::query_as::<_, Contact>(
+        "SELECT * FROM contacts WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(claims.tenant_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Contact not found".into()))?;
+    Ok(Json(item))
+}
+
+pub async fn update_contact(
+    Extension(claims): Extension<Claims>,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateContactRequest>,
+) -> Result<Json<Contact>, AppError> {
+    let existing = sqlx::query_as::<_, Contact>(
+        "SELECT * FROM contacts WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(claims.tenant_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Contact not found".into()))?;
+
+    let now = chrono::Utc::now().naive_utc();
+    sqlx::query(
+        "UPDATE contacts SET name=$1, phone=$2, email=$3, company=$4, notes=$5, tags=$6, updated_at=$7 WHERE id=$8",
+    )
+    .bind(req.name.unwrap_or(existing.name))
+    .bind(req.phone.unwrap_or(existing.phone))
+    .bind(req.email.or(existing.email))
+    .bind(req.company.or(existing.company))
+    .bind(req.notes.or(existing.notes))
+    .bind(req.tags.or(existing.tags))
+    .bind(now)
+    .bind(id)
+    .execute(&state.pool)
+    .await?;
+
+    let item = sqlx::query_as::<_, Contact>("SELECT * FROM contacts WHERE id = $1")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+    Ok(Json(item))
+}
+
+pub async fn delete_contact(
+    Extension(claims): Extension<Claims>,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = sqlx::query("DELETE FROM contacts WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(claims.tenant_id)
+        .execute(&state.pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Contact not found".into()));
+    }
+    Ok(Json(serde_json::json!({"message": "Contact deleted"})))
+}
+
+pub async fn search_contacts(
+    Extension(claims): Extension<Claims>,
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<Contact>>, AppError> {
+    let query = params.get("q").map(|s| format!("%{}%", s));
+    let phone = params.get("phone");
+
+    let items = if let Some(p) = phone {
+        sqlx::query_as::<_, Contact>(
+            "SELECT * FROM contacts WHERE tenant_id = $1 AND phone LIKE $2 ORDER BY name ASC",
+        )
+        .bind(claims.tenant_id)
+        .bind(p)
+        .fetch_all(&state.pool)
+        .await?
+    } else if let Some(q) = query {
+        sqlx::query_as::<_, Contact>(
+            "SELECT * FROM contacts WHERE tenant_id = $1 AND (name ILIKE $2 OR phone ILIKE $2 OR email ILIKE $2) ORDER BY name ASC",
+        )
+        .bind(claims.tenant_id)
+        .bind(&q)
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, Contact>(
+            "SELECT * FROM contacts WHERE tenant_id = $1 ORDER BY name ASC",
+        )
+        .bind(claims.tenant_id)
+        .fetch_all(&state.pool)
+        .await?
+    };
+
+    Ok(Json(items))
+}

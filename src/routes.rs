@@ -1,0 +1,101 @@
+use axum::{
+    middleware,
+    routing::{get, post, put, delete},
+    Router,
+};
+use tower_http::cors::CorsLayer;
+
+use crate::{
+    auth::{handlers as auth_handlers, middleware::auth_middleware},
+    handlers::{
+        api_key_handler, call_handler, call_log_handler, contact_handler, dashboard_handler,
+        follow_up_handler, integration_handler, portfolio_handler, integration_target_handler,
+        message_handler, message_template_handler,
+        response_rule_handler, settings_handler, voicemail_handler,
+    },
+    state::AppState,
+};
+
+pub fn create_router(state: AppState) -> Router {
+    let public_routes = Router::new()
+        .route("/api/v1/health", get(health_check))
+        .route("/api/v1/auth/register", post(auth_handlers::register))
+        .route("/api/v1/auth/login", post(auth_handlers::login))
+        .route("/api/v1/auth/forgot-password", post(auth_handlers::forgot_password))
+        .route("/api/v1/auth/reset-password", post(auth_handlers::reset_password));
+
+    let protected_routes = Router::new()
+        .route("/api/v1/auth/me", get(auth_handlers::me))
+        .route("/api/v1/auth/password", put(auth_handlers::change_password))
+        // Calls
+        .route("/api/v1/calls", get(call_handler::list_calls).post(call_handler::create_call))
+        .route("/api/v1/calls/:id", get(call_handler::get_call).put(call_handler::update_call).delete(call_handler::delete_call))
+        .route("/api/v1/calls/:id/voicemail", get(call_handler::get_call_voicemail))
+        .route("/api/v1/calls/:id/respond", post(call_handler::respond_to_call))
+        // Response Rules
+        .route("/api/v1/response-rules", get(response_rule_handler::list_response_rules).post(response_rule_handler::create_response_rule))
+        .route("/api/v1/response-rules/:id", put(response_rule_handler::update_response_rule).delete(response_rule_handler::delete_response_rule))
+        // Follow Ups
+        .route("/api/v1/follow-ups", get(follow_up_handler::list_follow_ups).post(follow_up_handler::create_follow_up))
+        .route("/api/v1/follow-ups/:id", put(follow_up_handler::update_follow_up).delete(follow_up_handler::delete_follow_up))
+        // Messages
+        .route("/api/v1/messages", get(message_handler::list_messages).post(message_handler::create_message))
+        .route("/api/v1/messages/:id", get(message_handler::get_message))
+        // Message Templates
+        .route("/api/v1/message-templates", get(message_template_handler::list_message_templates).post(message_template_handler::create_message_template))
+        .route("/api/v1/message-templates/:id", put(message_template_handler::update_message_template).delete(message_template_handler::delete_message_template))
+        // Contacts
+        .route("/api/v1/contacts", get(contact_handler::list_contacts).post(contact_handler::create_contact))
+        .route("/api/v1/contacts/search", get(contact_handler::search_contacts))
+        .route("/api/v1/contacts/:id", get(contact_handler::get_contact).put(contact_handler::update_contact).delete(contact_handler::delete_contact))
+        // Voicemails
+        .route("/api/v1/voicemails", get(voicemail_handler::list_voicemails))
+        .route("/api/v1/voicemails/:id", get(voicemail_handler::get_voicemail).put(voicemail_handler::update_voicemail))
+        // Call Logs
+        .route("/api/v1/call-logs", get(call_log_handler::list_call_logs))
+        .route("/api/v1/call-logs/export", get(call_log_handler::export_call_logs))
+        // Integrations
+        .route("/api/v1/integrations", get(integration_handler::list_integrations).post(integration_handler::create_integration))
+        .route("/api/v1/integrations/:id", put(integration_handler::update_integration).delete(integration_handler::delete_integration))
+        .route("/api/v1/integrations/:id/test", post(integration_handler::test_integration))
+        // Dashboard
+        .route("/api/v1/dashboard/stats", get(dashboard_handler::get_dashboard_stats))
+        .route("/api/v1/dashboard/activity", get(dashboard_handler::get_dashboard_activity))
+        // Settings
+        .route("/api/v1/settings", get(settings_handler::get_settings).put(settings_handler::update_settings))
+        // API Key management
+        .route("/api/v1/api-keys", post(api_key_handler::create_api_key).get(api_key_handler::list_api_keys))
+        .route("/api/v1/api-keys/:id", put(api_key_handler::update_api_key).delete(api_key_handler::delete_api_key))
+        // Portfolio Companies
+        .route("/api/v1/portfolio-companies", get(portfolio_handler::list_portfolio_companies).post(portfolio_handler::create_portfolio_company))
+        .route("/api/v1/portfolio-companies/:id", get(portfolio_handler::get_portfolio_company).put(portfolio_handler::update_portfolio_company).delete(portfolio_handler::delete_portfolio_company))
+        // Integration Targets
+        .route("/api/v1/integration-targets", get(integration_target_handler::list_integration_targets).post(integration_target_handler::create_integration_target))
+        .route("/api/v1/integration-targets/:id", put(integration_target_handler::update_integration_target).delete(integration_target_handler::delete_integration_target))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+
+    Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
+
+        // Admin endpoints (cross-app portfolio sync + impersonation)
+        .route("/api/v1/admin/portfolio-sync", post(crate::handlers::admin_handler::portfolio_sync))
+        .route("/api/v1/admin/impersonate", post(crate::handlers::admin_handler::impersonate))
+        .route("/api/v1/admin/stop-impersonation", post(crate::handlers::admin_handler::stop_impersonation))
+        // Admin plan management
+        .route("/api/v1/admin/plans", get(crate::handlers::plans_handler::list_plans).post(crate::handlers::plans_handler::create_plan))
+        .route("/api/v1/admin/plans/assign", post(crate::handlers::plans_handler::admin_assign_plan))
+        .route("/api/v1/admin/plans/:id", get(crate::handlers::plans_handler::get_plan).put(crate::handlers::plans_handler::update_plan).delete(crate::handlers::plans_handler::delete_plan))
+        .route("/api/v1/admin/plans/:id/features", put(crate::handlers::plans_handler::admin_update_plan_features))
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
+
+async fn health_check() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "service": "missedcall-respondr",
+        "version": "0.1.0"
+    }))
+}
+
